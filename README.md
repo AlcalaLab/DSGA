@@ -1,2 +1,8 @@
-# DSaGGA
+# DSGA
+IN PROGRESS!
+
 A toolkit for Delineating Somatic and Germline Genome Architecture
+
+## Dependencies
++ BioPython
++ BLAST+
