@@ -217,9 +217,9 @@ def check_soma_coverage(
 def sort_and_check_num_loci(coords_lst):
     num_loci = len(set([i[0] for i in coords_lst]))
     if num_loci > 1:
-        sorted_coords = sorted(v, key = lambda x: (x[0], x[2]))
+        sorted_coords = sorted(coords_lst, key = lambda x: (x[0], x[2]))
     else:
-        sorted_coords = sorted(v, key = lambda x:  x[2])
+        sorted_coords = sorted(coords_lst, key = lambda x:  x[2])
     return sorted_coords, num_loci
 
 
@@ -264,7 +264,6 @@ def filter_multi_loci(soma_name, sorted_coords, min_aln_prop, min_pointer = 2, m
         if sum([i[1] for i in v]) > best_cover[0]:
             best_cover = [sum([i[1] for i in v]), k]
 
-
     if best_cover[-1]:
         return init_filt_dict[best_cover[-1]]
 
@@ -290,7 +289,6 @@ def filter_hits(
     for line in open(out_tsv).readlines():
         # if eval_soma not in line:
         #     continue
-
         s, g = line.split('\t')[:2]
         aln = line.split('\t')[3]
         ss, se, gs, ge = line.split('\t')[6:10]
@@ -303,7 +301,7 @@ def filter_hits(
             skip_soma_germ.append(k)
             continue
 
-        sorted_coords, num_loci = sort_and_check_multi_loci(v)
+        sorted_coords, num_loci = sort_and_check_num_loci(v)
 
         filt_coords = []
 
@@ -315,31 +313,33 @@ def filter_hits(
                 filt_coords = drop_overlap_coords(sorted_coords)
 
             else:
-                filt_coords = filter_multi_loci(soma_name, sorted_coords, min_aln_prop, min_pointer, max_pointer)
+                filt_coords = filter_multi_loci(k, sorted_coords, min_aln_prop, min_pointer, max_pointer)
 
-        eval_locus_type(filt_coords)
+            if not filt_coords:
+                skip_soma_germ.append(k)
+                continue
 
-        if not filt_coords:
-            skip_soma_germ.append(k)
-            continue
+            if not check_soma_coverage(k, filt_coords):
+                skip_soma_germ.append(k)
+                continue
 
-        if not check_soma_coverage(k, filt_coords):
-            skip_soma_germ.append(k)
-            continue
+            germ_arch_type = eval_locus_type(filt_coords)
 
-        germ_arch_type = eval_locus_type(filt_coords)
+            mds_num = 1
 
-        mds_num = 1
+            for i in filt_coords:
+                updated_line = '\t'.join(f'{n}' for n in i)
 
-        for i in filt_coords:
-            updated_line = '\t'.join(f'{n}' for n in i)
+                soma_germ_summary.append(f'{k}\t{updated_line}\t{germ_arch_type}\tMDS-{mds_num}')
 
-            soma_germ_summary.append(f'{k}\t{updated_line}\t{germ_arch_type}\tMDS-{mds_num}')
+                mds_num += 1
 
-            mds_num += 1
 
     if soma_germ_summary:
+
         return soma_germ_summary, soma_germ_dict, list(set(skip_soma_germ))
+
+    return None
 
 
 
@@ -350,7 +350,7 @@ def refine_nonscrambled():
 def save_summary_tsv(sg_summary: list, outdir: str, taxon_name: str, multi_filt: bool = True):
     dsga_tsv = f'{outdir}/{taxon_name}.DSGA'
     if multi_filt:
-        dsga += '_MultiFilt.Summary'
+        dsga_tsv += '_MultiFilt.Summary'
 
     header = 'Soma\tGerm\tAlignment_Length\tSoma_Start\tSoma_End\tGerm_Start\tGerm_End\tGSA_Type\tMDS_Number\n'
 
@@ -393,6 +393,7 @@ if '' in (taxon_name, germ_fasta, soma_fasta):
 
 min_germ = 10000
 min_soma = 400
+min_aln_prop = 0.6
 min_pointer = 2
 max_pointer = 25
 multi_filt = True
@@ -419,4 +420,5 @@ sg_summary, soma_germ_dict, skip_soma_germ = filter_hits(
                                                 max_pointer,
                                                 multi_filt)
 
-save_summary_tsv(sg_summary, out_dir, taxon_name, multi_filt)
+if sg_summary:
+    save_summary_tsv(sg_summary, out_dir, taxon_name, multi_filt)
