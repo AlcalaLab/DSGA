@@ -12,28 +12,33 @@ Dependencies:
 Last updated: 31-07-26
 """
 
-import os, sys
-
-from Bio.Seq import Seq
-from Bio import SeqIO
-from pathlib import Path
+import os, sys, warnings
 
 from collections import defaultdict
+from pathlib import Path
 
-def prepare_fasta(outdir: str, taxon_name: str,fasta: str, min_len: int = 10000, germ: bool = True):
-    fasta_prep_dir = f'{outdir}/Assembly_Backup/'
+# Suppress BioPython's Runtime Warning
+warnings.filterwarnings("ignore", category = RuntimeWarning)
+from Bio.Seq import Seq
+from Bio import SeqIO
+
+def check_exising_files(filename: str):
+    return Path(filename).is_file() and Path(filename).stat().st_size > 0
+
+def prepare_fasta(outdir: str, taxon_name: str, fasta: str, min_len: int = 10000, germ: bool = True):
+    fasta_prep_dir = f'{outdir}Assembly_Backup/'
     # print(fasta_prep_dir)
 
     Path(fasta_prep_dir).mkdir(exist_ok = True, parents = True)
 
     if germ:
-        out_fasta = f'{fasta_prep_dir}/{taxon_name}.Germ.{int(min_len/1000)}Kbp.fasta'
+        out_fasta = f'{fasta_prep_dir}{taxon_name}.Germ.{int(min_len/1000)}Kbp.fasta'
     else:
-        out_fasta = f'{fasta_prep_dir}/{taxon_name}.Soma.{min_len}bp.fasta'
+        out_fasta = f'{fasta_prep_dir}{taxon_name}.Soma.{min_len}bp.fasta'
 
     x = []
     nseqs = 1
-    for i in SeqIO.parse(germ_fasta, 'fasta'):
+    for i in SeqIO.parse(fasta, 'fasta'):
         if len(i.seq) < min_len:
             continue
         if germ:
@@ -61,7 +66,7 @@ def prep_blast(outdir: str, taxon_name: str, germ_fasta: str):
                     f'-in {germ_fasta} ' \
                     f'-out {germ_db}'
 
-    if Path(f'{germ_db}.ndb').is_file() and Path(f'{germ_db}.ndb').stat().st_size > 0:
+    if check_exising_files(f'{germ_db}.ndb'):
         return germ_db
 
     else:
@@ -95,8 +100,9 @@ def blast_germ_soma(
                 f'-query {soma_fasta} ' \
                 f'-out {out_tsv}'
 
-    if Path(out_tsv).is_file() and Path(out_tsv).stat().st_size > 0:
+    if check_exising_files(out_tsv):
         return out_tsv
+
     else:
         print('Running BLASTN -- This may take a while!')
         os.system(blast_cmd)
@@ -131,36 +137,34 @@ def drop_overlap_coords(coords_sorted_lst: list, thresh: float = 0.5) -> list:
     return coords_keep
 
 
-def extract_valid_overlaps(sorted_cords, min_pointer = 2, max_pointer = 25):
-    # sort by starting position and record the index for easier extraction later
-    indexed_ranges = sorted(
-            [(r[2], r[3], i) for i, r in enumerate(sorted_coords)],
-            key = lambda x: (x[0], x[1]))
+def extract_valid_overlaps(filt_coords, min_pointer = 2, max_pointer = 25):
 
     overlapping_pairs = []
+    consecutive_mds = []
 
-    for i in range(len(indexed_ranges)):
-        start1, end1, idx1 = indexed_ranges[i]
+    indexed_ranges = sorted(
+            [(r[2], r[3], i) for i, r in enumerate(filt_coords)],
+            key = lambda x: (x[0], x[1]))
 
-        for j in range(i + 1, len(indexed_ranges)):
-            start2, end2, idx2 = indexed_ranges[j]
+    for i in range(len(indexed_ranges)-1):
+        mds_st_1, mds_end_1, mds_idx_1 = indexed_ranges[i]
+        mds_st_2, mds_end_2, mds_idx_2 = indexed_ranges[i+1]
 
-            if start2 >= end1:
-                break
+        if mds_st_2 > mds_end_1:
+            continue
 
-            # Calculate the explicit overlap bounds
-            overlap_start = max(start1, start2)
-            overlap_end = min(end1, end2)
-            overlap_size = overlap_end - overlap_start
+        pointer_size = (mds_end_1 - mds_st_2)+1
 
-            # 3. Filter based on the size constraints
-            if min_pointer <= overlap_size <= max_pointer:
-                overlapping_pairs.append({
-                    "range_1": (start1, end1),
-                    "range_2": (start2, end2),
-                    "original_indices": (idx1, idx2),
-                    "overlap_size": overlap_size
-                })
+        if min_pointer <= pointer_size <= max_pointer:
+            overlapping_pairs.append({
+                "mds_1": (mds_st_1, mds_end_1),
+                "mds_2": (mds_st_2, mds_end_2),
+                "original_indices": (mds_idx_1, mds_idx_2),
+                "pointer_size": pointer_size})
+
+            consecutive_mds.append((filt_coords[mds_idx_1], filt_coords[mds_idx_2]))
+
+    return consecutive_mds
 
 
 def eval_sign(coords: list) -> str:
@@ -168,7 +172,6 @@ def eval_sign(coords: list) -> str:
         return (coords[-1] - coords[-2]) / abs(coords[-1] - coords[-2])
     except ZeroDivisionError:
         return None
-
 
 
 def eval_locus_type(coords_lst: list) -> str:
@@ -211,50 +214,132 @@ def check_soma_coverage(
     return sum([i[1] for i in soma_hits]) >= min_soma
 
 
+def sort_and_check_num_loci(coords_lst):
+    num_loci = len(set([i[0] for i in coords_lst]))
+    if num_loci > 1:
+        sorted_coords = sorted(v, key = lambda x: (x[0], x[2]))
+    else:
+        sorted_coords = sorted(v, key = lambda x:  x[2])
+    return sorted_coords, num_loci
+
+
+def filter_multi_loci(soma_name, sorted_coords, min_aln_prop, min_pointer = 2, max_pointer = 25):
+    multi_dict = defaultdict(list)
+    init_filt_dict = {}
+
+    skip_soma_germ = []
+
+    best_cover = [0,'']
+
+    soma_len = int(soma_name.rpartition("Soma_")[-1].partition("_")[0])
+
+    for i in sorted_coords:
+        multi_dict[i[0]].append(i)
+
+    for k, v in multi_dict.items():
+        if not check_soma_coverage(soma_name, v, min_aln_prop):
+            skip_soma_germ.append(k)
+
+        elif len(v) == 1:
+            init_filt_dict[k] = v
+
+        else:
+            filt_coords = drop_overlap_coords(v)
+            pointer_eval = extract_valid_overlaps(filt_coords, min_pointer = 2, max_pointer = 25)
+
+            # Check note below (so redundant... but to make it hard to miss)
+            """
+            NOTE FOR MYSELF: there needs to a missing-MDS option!!!!
+
+            add a missing MDS option down the road...
+            """
+
+            if pointer_eval:
+                init_filt_dict[k] = filt_coords
+
+            else:
+                init_filt_dict[k] = filt_coords
+
+    for k, v in init_filt_dict.items():
+        if sum([i[1] for i in v]) > best_cover[0]:
+            best_cover = [sum([i[1] for i in v]), k]
+
+
+    if best_cover[-1]:
+        return init_filt_dict[best_cover[-1]]
+
+    return None
+
+
+
 def filter_hits(
         out_tsv: str,
-        min_aln_prop: float = 0.6):
+        min_aln_prop: float = 0.6,
+        min_pointer = 2,
+        max_pointer = 25,
+        multi_filt: bool = True):
+
 
     # soma_germ_dict = defaultdict(list)
     skip_soma_germ = []
     soma_germ_summary = []
     soma_germ_dict = defaultdict(list)
-    # soma_germ_summary = defaultdict(list)
+
+    # eval_soma = ''
 
     for line in open(out_tsv).readlines():
+        # if eval_soma not in line:
+        #     continue
+
         s, g = line.split('\t')[:2]
         aln = line.split('\t')[3]
         ss, se, gs, ge = line.split('\t')[6:10]
+
         soma_germ_dict[s].append((g, int(aln), int(ss), int(se), int(gs), int(ge)))
 
-        # eval = 'Schmidingerella_arcuata_XX_Soma_1107_Len_1020_Kcov_11.62'
 
-        for k, v in soma_germ_dict.items():
-            if not check_soma_coverage(k, v, min_aln_prop):
-                skip_soma_germ.append(k)
-                continue
+    for k, v in soma_germ_dict.items():
+        if not check_soma_coverage(k, v, min_aln_prop):
+            skip_soma_germ.append(k)
+            continue
 
-            sorted_coords = sorted(v, key = lambda x: x[2])
+        sorted_coords, num_loci = sort_and_check_multi_loci(v)
 
-            print(k)
+        filt_coords = []
+
+        if not multi_filt:
             filt_coords = drop_overlap_coords(sorted_coords)
 
-            if not check_soma_coverage(k, filt_coords):
-                skip_soma_germ.append(k)
-                continue
+        else:
+            if num_loci == 1:
+                filt_coords = drop_overlap_coords(sorted_coords)
 
-            germ_arch_type = eval_locus_type(filt_coords)
-            print(germ_arch_type)
-            mds_num = 1
+            else:
+                filt_coords = filter_multi_loci(soma_name, sorted_coords, min_aln_prop, min_pointer, max_pointer)
 
-            for i in sorted_coords:
-                updated_line = '\t'.join(f'{n}' for n in i)
-                soma_germ_summary.append(f'{k}\t{updated_line}\t{germ_arch_type}\tMDS-{mds_num}')
-                mds_num += 1
+        eval_locus_type(filt_coords)
 
-        if soma_germ_summary:
-            print(len(soma_germ_dict))
-            return soma_germ_summary, soma_germ_dict, list(set(skip_soma_germ))
+        if not filt_coords:
+            skip_soma_germ.append(k)
+            continue
+
+        if not check_soma_coverage(k, filt_coords):
+            skip_soma_germ.append(k)
+            continue
+
+        germ_arch_type = eval_locus_type(filt_coords)
+
+        mds_num = 1
+
+        for i in filt_coords:
+            updated_line = '\t'.join(f'{n}' for n in i)
+
+            soma_germ_summary.append(f'{k}\t{updated_line}\t{germ_arch_type}\tMDS-{mds_num}')
+
+            mds_num += 1
+
+    if soma_germ_summary:
+        return soma_germ_summary, soma_germ_dict, list(set(skip_soma_germ))
 
 
 
@@ -262,20 +347,21 @@ def refine_nonscrambled():
     pass
 
 
-def save_summary_tsv(sg_summary: list, outdir: str, taxon_name: str):
-    dsga_tsv = f'{outdir}/{taxon_name}.DSGA.Summary.tsv'
+def save_summary_tsv(sg_summary: list, outdir: str, taxon_name: str, multi_filt: bool = True):
+    dsga_tsv = f'{outdir}/{taxon_name}.DSGA'
+    if multi_filt:
+        dsga += '_MultiFilt.Summary'
+
     header = 'Soma\tGerm\tAlignment_Length\tSoma_Start\tSoma_End\tGerm_Start\tGerm_End\tGSA_Type\tMDS_Number\n'
-    with open(dsga_tsv, 'w+') as w:
+
+    with open(f'{dsga_tsv}.tsv', 'w+') as w:
         w.write(header)
         w.write('\n'.join(sg_summary))
 
 
 
-print('\nworking on the pointer overlap instead of relying on inferences solely based pure overlaps! Do this BY locus pairing?')
-
 print('\nThis code is NOT functional alone, yet!\n')
 
-sys.exit()
 """
 for each locus ... find out if it covers a substantial portion
 
@@ -294,9 +380,6 @@ a complicated up way...
 
 taxon_name = ''
 
-if not taxon_name:
-    sys.exit()
-
 out_dir = f'{taxon_name}_DSGA/'
 
 threads = 2
@@ -304,18 +387,36 @@ threads = 2
 germ_fasta = ''
 soma_fasta = ''
 
+if '' in (taxon_name, germ_fasta, soma_fasta):
+    print('Edit the script and add the missing information for the taxon-name, germline-fasta, soma-fasta!\n')
+    sys.exit()
 
-germ_filt_fasta = prepare_fasta(out_dir, taxon_name, germ_fasta)
-soma_filt_fasta = prepare_fasta(out_dir, taxon_name, soma_fasta, 400, False)
+min_germ = 10000
+min_soma = 400
+min_pointer = 2
+max_pointer = 25
+multi_filt = True
+
+
+germ_filt_fasta = prepare_fasta(out_dir, taxon_name, germ_fasta, min_germ)
+soma_filt_fasta = prepare_fasta(out_dir, taxon_name, soma_fasta, min_soma, False)
 
 out_tsv = blast_germ_soma(
             out_dir,
             taxon_name,
             germ_filt_fasta,
             soma_filt_fasta,
-            10000,
-            400,
+            min_germ,
+            min_soma,
             threads)
 
-sg_summary, soma_germ_dict, skip_soma_germ = filter_hits(out_tsv)
-save_summary_tsv(sg_summary, out_dir, taxon_name)
+# print(out_tsv)
+
+sg_summary, soma_germ_dict, skip_soma_germ = filter_hits(
+                                                out_tsv,
+                                                min_aln_prop,
+                                                min_pointer,
+                                                max_pointer,
+                                                multi_filt)
+
+save_summary_tsv(sg_summary, out_dir, taxon_name, multi_filt)
