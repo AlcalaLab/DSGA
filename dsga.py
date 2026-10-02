@@ -11,7 +11,7 @@ Dependencies:
 Last updated: 18-09-26
 """
 
-import os, subprocess, sys, warnings
+import glob, os, subprocess, sys, warnings
 
 from collections import defaultdict
 from pathlib import Path
@@ -422,9 +422,6 @@ def filter_hits(
     return None
 
 
-def refine_nonscrambled():
-    pass
-
 
 def save_summary_tsv(sg_summary: list, outdir: str, out_name: str, multi_filt: bool = True):
     dsga_tsv = f'{outdir}/{out_name}.DSGA'
@@ -437,6 +434,93 @@ def save_summary_tsv(sg_summary: list, outdir: str, out_name: str, multi_filt: b
     with open(f'{dsga_tsv}.tsv', 'w+') as w:
         w.write(header)
         w.write('\n'.join(sg_summary))
+
+
+def nonscram_loci_for_eval(
+        sg_summary: list,
+        soma_germ_dict: dict
+        ) -> dict:
+
+    nsc_eval_dict = {}
+    for i in sg_summary:
+        if 'Non-Scrambled' in i:
+
+            nsc_locus = sorted(soma_germ_dict[i.split('\t')[0]], key = lambda x: x[2])
+            nsc_sst = nsc_locus[0][2]
+            nsc_send = nsc_locus[-1][3]
+
+            nsc_gst = nsc_locus[0][-2]
+            nsc_gend = nsc_locus[-1][-1]
+
+            frame = 'f'
+
+            if nsc_gst > nsc_gend:
+                frame = 'r'
+
+            nsc_eval_dict[i.split('\t')[0]] = [nsc_locus[0][0], nsc_sst, nsc_send, nsc_gst, nsc_gend, frame]
+
+    return nsc_eval_dict
+
+
+def align_germ_soma(
+        out_unaln: str,
+        out_aln: str,
+        threads: int = 4):
+
+    for f in glob.glob(f'{out_unaln}*fasta'):
+        out_f = f.replace("UnAlign","Align").replace(".fasta",".LINSI.fasta")
+
+        mafft_cmd = f'linsi --quiet --thread {threads} {f} > {out_f}'
+
+        mafft_result = subprocess.run(mafft_cmd, shell = True, stdout = subprocess.DEVNULL, check = True)
+
+
+def prep_nonscram_loci(
+        out_dir: str,
+        soma_prep_fasta: str,
+        germ_prep_fasta: str,
+        sg_summary: list,
+        soma_germ_dict: dict):
+
+    nsc_eval_dict = nonscram_loci_for_eval(
+                        sg_summary,
+                        soma_germ_dict)
+
+    out_unaln = f'{out_dir}NonScrambled_Refinement/UnAligned_Soma_Germ/'
+    out_aln = out_unaln.replace("UnAlign","Align")
+
+    Path(out_unaln).mkdir(exist_ok = True, parents = True)
+    Path(out_aln).mkdir(exist_ok = True, parents = True)
+
+    germ_loci = list(set([v[0] for v in nsc_eval_dict.values()]))
+
+    soma_seqs = {i.id:f'{i.seq}' for i in SeqIO.parse(soma_prep_fasta, 'fasta') if i.id in nsc_eval_dict.keys()}
+    germ_seqs = {i.id:f'{i.seq}' for i in SeqIO.parse(germ_prep_fasta, 'fasta') if i.id in germ_loci}
+
+    for k, v in nsc_eval_dict.items():
+        out_fasta = f'{k}_XX_{v[0].rpartition("_XX_")[-1]}.UnAligned.fasta'
+        s_st = v[1]-1
+        s_end = v[2]
+        seqs = f'>{k}_XX_{s_st}_{s_end}\n{soma_seqs[k][s_st:s_end]}\n'
+
+        if v[-1] == 'f':
+            g_st = max(v[-3]-200, 0)
+            g_end = min(v[-2]+200, int(v[0].rpartition("_")[-1]))
+            seqs += f'>{v[0]}_XX_{g_st}_{g_end}\n{germ_seqs[v[0]][g_st:g_end+1]}'
+
+        else:
+            g_st = max(v[-2]-200, 0)
+            g_end = min(v[-3]+200, int(v[0].rpartition("_")[-1]))
+            g_seq = Seq(germ_seqs[v[0]][g_st:g_end+1])
+            seqs += f'>{v[0]}_XX_{g_end}_{g_st}\n{germ_seqs[v[0]][g_st:g_end+1]}'
+
+        with open(f'{out_unaln}{out_fasta}','w+') as w:
+            w.write(seqs)
+
+    align_germ_soma(out_unaln, out_aln)
+
+    return out_aln
+
 
 
 def eval_germ_soma_arch(
@@ -473,7 +557,15 @@ def eval_germ_soma_arch(
                                                     multi_filt)
 
     if sg_summary:
-        save_summary_tsv(sg_summary, out_dir, out_name, multi_filt)
+        print('Refining Non-scrambled Loci -- This may take a while')
+        nsc_align_dir = prep_nonscram_loci(
+                            out_dir,
+                            soma_filt_fasta,
+                            germ_filt_fasta,
+                            sg_summary,
+                            soma_germ_dict)
+
+    save_summary_tsv(sg_summary, out_dir, out_name, multi_filt)
 
 
 if __name__ == '__main__':
