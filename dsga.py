@@ -468,9 +468,9 @@ def align_germ_soma(
         threads: int = 4):
 
     for f in glob.glob(f'{out_unaln}*fasta'):
-        out_f = f.replace("UnAlign","Align").replace(".fasta",".LINSI.fasta")
+        out_f = f.replace("UnAlign","Align").replace(".fasta",".EINSI.fasta")
 
-        mafft_cmd = f'linsi --quiet --thread {threads} {f} > {out_f}'
+        mafft_cmd = f'einsi --quiet --thread {threads} {f} > {out_f}'
 
         mafft_result = subprocess.run(mafft_cmd, shell = True, stdout = subprocess.DEVNULL, check = True)
 
@@ -511,8 +511,8 @@ def prep_nonscram_loci(
         else:
             g_st = max(v[-2]-200, 0)
             g_end = min(v[-3]+200, int(v[0].rpartition("_")[-1]))
-            g_seq = Seq(germ_seqs[v[0]][g_st:g_end+1])
-            seqs += f'>{v[0]}_XX_{g_end}_{g_st}\n{germ_seqs[v[0]][g_st:g_end+1]}'
+            g_seq = Seq(germ_seqs[v[0]][g_st:g_end+1]).reverse_complement()
+            seqs += f'>{v[0]}_XX_{g_end}_{g_st}_RC\n{g_seq}'
 
         with open(f'{out_unaln}{out_fasta}','w+') as w:
             w.write(seqs)
